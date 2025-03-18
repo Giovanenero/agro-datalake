@@ -1,42 +1,171 @@
 import os
-import undetected_chromedriver as uc
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-import time
 import random
- 
+import re
+import shutil
+import time
+import subprocess
+import time
+import PyPDF2
+from pymongo import MongoClient
+import logging
+
+LOG_FILE = "certidao.log"
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+HOST = os.getenv("HOST")
+DATABASE_NAME = 'AGRONEGOCIO'
+COLLECTION_NAME = 'CAFIR'
+URL = 'https://solucoes.receita.fazenda.gov.br/Servicos/certidaointernet/ITR/Emitir'
+client = MongoClient(HOST)
+collection = client[DATABASE_NAME][COLLECTION_NAME]
+DOWNLOAD_PATH = "/home/giovane/Downloads"
+FOLDER_PATH = os.path.join(os.getcwd(), 'certidoes')
+LIMIT = 200
+
+def run_command(command, sleep=0.5):
+    """Executa um comando no shell"""
+    subprocess.run(command, shell=True)
+    time.sleep(sleep)
+
+def open_window():
+    run_command('xdotool search --onlyvisible --class "chrome" windowactivate')
+    run_command("xdotool key ctrl+t")
+    time.sleep(1)
+
+    window_id = os.popen("xdotool search --onlyvisible --class 'chrome' | head -n 1").read().strip()
+
+    run_command(f'xdotool type "{URL}"')
+    run_command("xdotool key Return")
+    time.sleep(2)
+
+    run_command(f"xdotool windowactivate {window_id}")
+
+def wait_download(file_name, timeout=30):
+    start_time = time.time()
+    file_path = os.path.join(DOWNLOAD_PATH, file_name)
+    while time.time() - start_time < timeout:
+        if os.path.exists(file_path) and not file_path.endswith(('.crdownload', '.part')):
+            return True
+        time.sleep(1)
+    return False
+
+def move_file(file_name):
+    file_path = os.path.join(DOWNLOAD_PATH, file_name)
+    if os.path.exists(file_path):
+        shutil.move(file_path, FOLDER_PATH)
+
+def process_file(file_path):
+    if not os.path.exists(file_path):
+        logging.error(f"Caminho para o arquivo {file_path} não existe")
+        return None
+    
+    try:
+        file = open(file_path, 'rb')
+        pdf = PyPDF2.PdfReader(file)
+        lines = pdf.pages[0].extract_text().split('\n')
+        nm_imovel = lines[6].replace('Nome do Imóvel: ', '').upper().strip()
+        municipio = re.sub(r'Município: | UF: \w{2}', '', lines[8]).upper().strip()   
+        area = float(re.sub(r'[^0-9,]', '', lines[9]).replace(',', '.'))
+        contribuinte = lines[11].replace('Contribuinte: ', '').strip()
+        in_cpf = 'CPF' in lines[12]
+        cpf_cnpj = re.sub(r'\D', '', lines[12]) 
+
+        return {
+            'AREA_TOTAL': area,
+            'NM_IMOVEL': nm_imovel,
+            'NM_MUNICIPIO': municipio,
+            'CPF_CNPJ': cpf_cnpj,
+            'NM_CONTRIBUINTE': contribuinte,
+            'IN_CPF': in_cpf
+        }
+    except Exception as e:
+        logging.error(f"Erro ao processar {file_path} | ERROR: {e}")
+    return None
+
+def insert_fields(collection, update_fields, cib):
+    try:
+        collection.update_one(
+            {"NR_IMOVEL": cib},
+            {"$set": update_fields}
+        )
+        logging.info(f"Documento atualizado com sucesso | CIB: {cib}")
+    except Exception as e:
+        logging.info(f"Erro ao atualizar docuemnto | CIB: {cib} | ERROR: {e}")
+
+def remove_file(file_path):
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+def update_count(count:int):
+    count += 1
+    if count >= LIMIT:
+        count = 0
+        time.sleep(1800) # espera 30min, pois assim deve evitar o bloqueio por parte do site
+    return count
+
 def main():
-    options = uc.ChromeOptions()
-    profile = '/home/giovane/.config/google-chrome/Profile 1'
-    options.add_argument(f"--user-data-dir={profile}")
-    options.add_argument(f'--load-extension={os.path.abspath("hekt")}')
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36")
-    #options.add_argument("--no-sandbox")
-    #options.add_argument("--disable-gpu")
-    #options.add_argument("--disable-dev-shm-usage")
+    try:
+        client = MongoClient(HOST)
+        collection = client[DATABASE_NAME][COLLECTION_NAME]
+        docs = collection.aggregate([
+            {"$match": {"CPF_CNPJ": None, "NR_IMOVEL": {"$ne": None}}},
+            {"$sample": {"size": 1000}}
+        ])
+        cibs = [doc['NR_IMOVEL'] for doc in docs]
+    except Exception as e:
+        logging.error(f"Encerrando o programa, pois não foi possível criar conexão com o mongodb | ERROR: {e}")
+        exit(1)
+        
+    os.makedirs(FOLDER_PATH, exist_ok=True)
+    count = -1
 
-    driver = uc.Chrome(options=options) # usando undetected chrome-driver, vai eliminar/esconder a maioria dos metadados que o selenium (ou qualquer tipo de automação deixa)
-    driver.maximize_window()
+    try:
+        for cib in cibs:
+            count = update_count(count)
+            open_window()
+            time.sleep(random.uniform(5, 15))
 
-    url = 'https://solucoes.receita.fazenda.gov.br/Servicos/certidaointernet/ITR/Emitir'
-    driver.get(url)
-    time.sleep(random.uniform(1, 8)) # simulando comportamento humano (tempo pra mexer na página)
-   
-    WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.ID, 'NI')))
-    time.sleep(random.uniform(1, 5)) # simulando comportamento humano (tempo pra mexer na página)
-   
-    inputcib = driver.find_element(By.ID, 'NI')
-    inputcib.send_keys('22749683')
-    time.sleep(random.uniform(1, 5)) # simulando comportamento humano (tempo pra mexer na página)
-    submitbutton = driver.find_element(By.ID, 'validar')
-    time.sleep(random.uniform(1, 5))# simulando comportamento humano (tempo pra mexer na página)
-    submitbutton.send_keys(Keys.ENTER)
-    time.sleep(200) # simulando comportamento humano (tempo pra mexer na página)
- 
-    driver.quit()
- 
-if __name__ == "__main__":
+            run_command("xdotool mousemove 350 500 click 1")
+            logging.info(f'Coletando | CIB: {cib}')
+            run_command("xdotool mousemove 273 628 click 1")
+            run_command(f'xdotool type "{cib}"')
+            run_command("xdotool key Return")
+
+            file_name = f"Certidao-{cib}.pdf"
+            download = True
+            if not wait_download(file_name, 5):
+                run_command("xdotool mousemove 589 472 click 1")
+                run_command("xdotool key Tab", 0.1)
+                run_command("xdotool key Tab", 0.1)
+                run_command("xdotool key Return")
+
+                if not wait_download(file_name, 5):
+                    logging.error(f'Não foi possível emitir a certidão.| CIB: {cib}')
+                    download = False
+                else:
+                    logging.info(f'Emissão da certidão realizada com sucesso. | CIB: {cib}')
+
+            run_command("xdotool key Ctrl+w")
+            if not download:
+                continue
+            
+            move_file(file_name)
+            file_path = os.path.join(FOLDER_PATH, file_name)
+            update_fields = process_file(file_path)
+            remove_file(file_path)
+            if not update_fields:
+                continue
+            
+            insert_fields(collection, update_fields, cib)
+    except Exception as e:
+        logging.error(f"Encerrando o programa, pois não foi possível emitir as certidões pelo CIB | ERROR: {e}")
+    finally:
+        if os.path.exists(FOLDER_PATH): shutil.rmtree(FOLDER_PATH)
+
+if __name__ == '__main__':
     main()

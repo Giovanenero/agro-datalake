@@ -20,7 +20,7 @@ from selenium.webdriver.support.ui import Select
 import undetected_chromedriver as webdriver
 
 # Configuração de logging
-LOG_FILE = "scraper-agro.log"
+LOG_FILE = "cafir-scnr.log"
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,
@@ -150,8 +150,6 @@ def dataframe_processing(file_name, date:datetime):
     df['CONDICAO_PESSOA'] = None
     df['PERCENTUAL_DETENCAO'] = None
 
-    #df["DT_ARQUIVO"] = pd.to_datetime(df["DT_ARQUIVO"])
-
     logging.info(f"Arquivo {file_name} processado com sucesso.")
     return df
 
@@ -161,6 +159,7 @@ def database_processing(collection):
         mais recente de acordo com a DT_ARQUIVO, além de remover do campo NR_IMOVEL
         os caracteres
     """
+    logging.info("Iniciando processamento do banco de dados.")
     field = 'NR_IMOVEL'
     # filtra os elementos duplicados
     pipeline = [
@@ -180,18 +179,21 @@ def database_processing(collection):
             }
         }}
     ]
-
+    logging.info("Removendo registros com o cib duplicado.")
     duplicates = list(collection.aggregate(pipeline, allowDiskUse=True))
     # Remover os documentos duplicados, mantendo apenas o mais recente
     for doc in duplicates:
         if doc["ids"]:
             collection.delete_many({"_id": {"$in": doc["ids"]}})
 
+    logging.info("Removendo registros com o cib com caracter.")
     # atualiza os documentos com o NR_IMOVEL com caracter para None
     collection.update_many(
         {"NR_IMOVEL": {"$regex": "[^0-9]"}},
         {"$set": {field: None}}
     )
+
+    logging.info("Finalizando o processamento do banco de dados.")
 
 def cafir_extraction():
     logging.info("Iniciando extração do CAFIR.")
@@ -241,56 +243,62 @@ def wait_download(timeout:int=300):
 
 def update_database(df: pd.DataFrame):
     client = MongoClient(HOST)
-    #collection = client[DABASE_NAME][COLLECTION_NAME + '_ld']
-    collection = client[DABASE_NAME][COLLECTION_NAME]
-    bulk_operations = []
-    
-    for _, row in df.iterrows():
-        codigo_imovel = row.get('CÓDIGO DO IMOVEL')
-        if not codigo_imovel:
-            continue
-        area = row.get('ÁREA TOTAL')
-        area_total = float(str(area).replace('.', '').replace(',', '.')) if area else None
+    collection = client[DABASE_NAME][COLLECTION_NAME + '_ld']
 
-        update_data = {
-            "DENOMINACAO_IMOVEL": str(row.get('DENOMINAÇÃO DO IMÓVEL', '')).upper() or None,
-            "CD_MUNICIPIO": row.get('CÓDIGO DO MUNICÍPIO (IBGE)'),
+    def parse_area(area):
+        """Converte string de área para float corretamente"""
+        return float(str(area).replace('.', '').replace(',', '.')) if area else None
+
+    datas = list(collection.find())
+    datas_dict = {data["NR_INCRA"]: data for data in datas}
+    new_datas = []
+    for i, row in df.iterrows():
+        cod = row.get("CÓDIGO DO IMOVEL")
+        if not cod:
+            continue
+
+        area_total = parse_area(row.get("ÁREA TOTAL", "0"))
+        natureza = row.get("NATUREZA JURÍDICA", None)
+        in_cpf = True if natureza else None
+        condicao = row.get("CONDIÇÃO DA PESSOA", None)
+        result = {
+            "DENOMINACAO_IMOVEL": str(row.get("DENOMINAÇÃO DO IMÓVEL", "")).upper() or None,
+            "CD_MUNICIPIO": row.get("CÓDIGO DO MUNICÍPIO (IBGE)"),
             "AREA_TOTAL": area_total,
-            "NM_CONTRIBUINTE": row.get('TITULAR'),
-            "NATUREZA_JURIDICA": str(row.get('NATUREZA JURÍDICA', '')).upper() or None,
-            "CONDICAO_PESSOA": str(row.get('CONDIÇÃO DA PESSOA', '')).upper() or None,
-            "PERCENTUAL_DETENCAO": row.get('PERCENTUAL DE DETENÇÃO')
+            "NM_CONTRIBUINTE": row.get("TITULAR"),
+            "NATUREZA_JURIDICA": str(natureza).upper() if natureza else None,
+            "CONDICAO_PESSOA": str(condicao).upper() if condicao else None,
+            "PERCENTUAL_DETENCAO": row.get("PERCENTUAL DE DETENÇÃO"),
+            "IN_CPF": in_cpf
         }
 
-        upsert_data = {
-            "$set": update_data,
-            "$setOnInsert": {
+        if cod in datas_dict:
+            # Atualiza o imóvel existente
+            datas_dict[cod].update(result)
+        else:
+            # Adiciona um novo imóvel
+            result.update({
                 "NR_IMOVEL": None,
                 "NM_IMOVEL": None,
                 "SIT_IMOVEL": None,
                 "ENDERECO": None,
                 "NM_DISTRITO": None,
-                "SG_UF": row.get('UF'),
-                "NM_MUNICIPIO": row.get('MUNICÍPIO', ''),
+                "SG_UF": row.get("UF", None),
+                "NM_MUNICÍPIO": row.get("MUNICÍPIO", None),
                 "CEP": None,
                 "DT_INSCRICAO": None,
                 "IN_INSENTO": None,
                 "CD_SCNR": None,
                 "NM_ARQUIVO": None,
                 "DT_ARQUIVO": None,
-                "CPF_CNPJ": None,
-                "IN_CPF": None
-            }
-        }
+                "CPF_CNPJ": None
+            })
+            new_datas.append(result)
 
-        bulk_operations.append(
-            UpdateOne({"NR_INCRA": int(codigo_imovel)}, upsert_data, upsert=True)
-        )
-
-        print(codigo_imovel)
-
-    if bulk_operations:
-        collection.bulk_write(bulk_operations)
+    # Atualiza a lista com os dados novos
+    datas.extend(new_datas)
+    drop_collection(COLLECTION_NAME + '_ld')
+    collection.insert_many(datas)
 
 def sncr_extraction():
     logging.info("Iniciando a extração do SCNR.")
@@ -298,33 +306,46 @@ def sncr_extraction():
     dir_temp(True, True)
 
     options = webdriver.ChromeOptions()
-    profile = '/home/giovane/.config/google-chrome/Profile 1'
     prefs = {
         "download.default_directory": FOLDER_PATH,
         "download.prompt_for_download": False, 
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True
     }
-    options.add_argument('--headless') 
+    #options.add_argument('--headless') 
     options.add_argument(f'--load-extension={os.path.abspath("hekt")}') # usado para resolver o hcaptcha
-    options.add_argument(f"--user-data-dir={profile}")
     options.add_experimental_option("prefs", prefs)
     
     driver = webdriver.Chrome(options=options)
     driver.maximize_window()
     driver.get(URL_SCNR)
-    sleep(10)
+    sleep(5)
 
     select = Select(driver.find_element(By.ID, 'selectUf'))
     select.select_by_visible_text("Paraíba")
 
-    button = driver.find_element(By.ID, 'botaoDownload')
-    button.click()
+    sleep(1)
 
-    if not wait_download():
-        driver.quit()
-        logging.error('Erro ao fazer download dos arquivos do SNCR em {}'.format(URL_SCNR))
-        exit(1)
+    select = Select(driver.find_element(By.ID, 'selectMunicipio'))
+    municipios = [option.text for option in select.options]
+    print(municipios)
+    for municipio in municipios:
+        sleep(5)
+        select = Select(driver.find_element(By.ID, 'selectUf'))
+        select.select_by_visible_text("Paraíba")
+
+        select = Select(driver.find_element(By.ID, 'selectMunicipio'))
+        select.select_by_visible_text(municipio)
+        button = driver.find_element(By.ID, 'botaoDownload')
+        button.click()
+
+        if not wait_download():
+            driver.quit()
+            logging.error('Erro ao fazer download dos arquivos do SNCR em {}'.format(URL_SCNR))
+            exit(1)
+
+        driver.refresh()
+    
 
     logging.info('Download dos arquivos do SNCR realizado com sucesso.')
     driver.quit()
@@ -336,11 +357,15 @@ def sncr_extraction():
         exit(1)
 
     file_names = [os.path.join(FOLDER_PATH, file_name) for file_name in file_names if file_name.endswith('.csv')]
+    df = pd.DataFrame()
     for file_name in file_names:
-        df = pd.read_csv(file_name, sep=';', encoding='utf8')
-        df = replace_null_value(df)
-        update_database(df)
+        df_aux = pd.read_csv(file_name, sep=';', encoding='utf8')
+        df = pd.concat([df, df_aux]).drop_duplicates().reset_index(drop=True)
         
+    df = replace_null_value(df)
+    logging.info("Iniciando processamento {}".format(file_name))
+    update_database(df)
+    logging.info("Finalizando processamento {}".format(file_name))
 
     dir_temp(False, True)
 
@@ -393,7 +418,7 @@ def main():
     cafir_extraction()
     sncr_extraction()
     replace_collection(name_old=collection_name)
-    create_index()
+    #create_index()
 
 if __name__ == '__main__':
     main()

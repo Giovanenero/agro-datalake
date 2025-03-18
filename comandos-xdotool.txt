@@ -1,0 +1,10 @@
+xdotool search --onlyvisible --class "chrome" windowactivate  
+xdotool key ctrl+t  
+xdotool type "https://solucoes.receita.fazenda.gov.br/Servicos/certidaointernet/ITR/Emitir"
+xdotool key Return
+xdotool windowactivate 46137367
+xdotool windowactivate 46137367
+xdotool type "89064062"
+xdotool mousemove 270 670 click 1
+xdotool mousemove 288 540 click 1 click 1
+xdotool selectwindow getmouselocation
