@@ -1,2 +1,4 @@
 .env
 *.log
+./img_test
+./test-tesseract.py

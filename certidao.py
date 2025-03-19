@@ -8,6 +8,9 @@ import time
 import PyPDF2
 from pymongo import MongoClient
 import logging
+import cv2
+import pytesseract
+from datetime import datetime, timezone
 
 LOG_FILE = "certidao.log"
 logging.basicConfig(
@@ -20,12 +23,22 @@ logging.basicConfig(
 HOST = os.getenv("HOST")
 DATABASE_NAME = 'AGRONEGOCIO'
 COLLECTION_NAME = 'CAFIR'
+COLLECTION_ERROR = 'CIB_INVALIDO'
 URL = 'https://solucoes.receita.fazenda.gov.br/Servicos/certidaointernet/ITR/Emitir'
-client = MongoClient(HOST)
-collection = client[DATABASE_NAME][COLLECTION_NAME]
 DOWNLOAD_PATH = "/home/giovane/Downloads"
-FOLDER_PATH = os.path.join(os.getcwd(), 'certidoes')
+IMAGENS_PATH = '/home/giovane/Imagens'
+FOLDER_PATH = os.path.join(os.getcwd(), 'temp')
 LIMIT = 200
+
+MAP_ERROR = {
+    '(Cancelado por Decisão Administrativa)': 'A emissão de certidão não foi permitida, pois o imóvel especificado foi cancelado por decisão administrativa.',
+    'Certidão de Dé 4à Não foi possivel realizar a consulta': 'Não foi possível realizar a consulta. Tente mais tarde.',
+    'são insuficientes para a': 'As informações disponíveis na Secretaria da Receita Federal do Brasil - RFB sobre o imóvel rural identificado pelo CIB informado são insuficientes para a emissão de certidão por meio da Internet.',
+    'tente novamente dentro de alguns minutos': 'Não foi possível concluir a ação para o contribuinte informado. Por favor, tente novamente dentro de alguns minutos.',
+    'nova certidão': 'Emissão de nova certidão',
+    'generico': 'Não foi possível emitir a certidão para o CIB especificado.',
+    'generico reemitir': 'Não foi possível reemitir a certidão para o CIB especificado.'
+}
 
 def run_command(command, sleep=0.5):
     """Executa um comando no shell"""
@@ -54,16 +67,13 @@ def wait_download(file_name, timeout=30):
         time.sleep(1)
     return False
 
-def move_file(file_name):
-    file_path = os.path.join(DOWNLOAD_PATH, file_name)
+def move_file(file_name:str):
+    folder_path = DOWNLOAD_PATH if file_name.endswith('.pdf') else IMAGENS_PATH
+    file_path = os.path.join(folder_path, file_name)
     if os.path.exists(file_path):
         shutil.move(file_path, FOLDER_PATH)
 
-def process_file(file_path):
-    if not os.path.exists(file_path):
-        logging.error(f"Caminho para o arquivo {file_path} não existe")
-        return None
-    
+def process_file(file_path):    
     try:
         file = open(file_path, 'rb')
         pdf = PyPDF2.PdfReader(file)
@@ -84,8 +94,9 @@ def process_file(file_path):
             'IN_CPF': in_cpf
         }
     except Exception as e:
-        logging.error(f"Erro ao processar {file_path} | ERROR: {e}")
-    return None
+        logging.exception(f"Erro ao processar {file_path} | ERROR: {e}")
+        exit(1)
+    finally: remove_file(file_path)
 
 def insert_fields(collection, update_fields, cib):
     try:
@@ -93,9 +104,19 @@ def insert_fields(collection, update_fields, cib):
             {"NR_IMOVEL": cib},
             {"$set": update_fields}
         )
-        logging.info(f"Documento atualizado com sucesso | CIB: {cib}")
     except Exception as e:
-        logging.info(f"Erro ao atualizar docuemnto | CIB: {cib} | ERROR: {e}")
+        logging.exception(f"Erro ao atualizar documento em {COLLECTION_NAME} | CIB: {cib}")
+
+def insert_error(collection, cib, error):
+    try:
+        doc = {
+            'NR_IMOVEL': cib,
+            'ERROR': error,
+            'DATA': datetime.now(timezone.utc)
+        }
+        collection.insert_one(doc)
+    except Exception as e:
+        logging.exception(f'Erro ao inserir documento em {COLLECTION_ERROR} | CIB: {cib}')
 
 def remove_file(file_path):
     if os.path.exists(file_path):
@@ -108,64 +129,106 @@ def update_count(count:int):
         time.sleep(1800) # espera 30min, pois assim deve evitar o bloqueio por parte do site
     return count
 
+def error_analysis(cib):
+    file_name = f'{cib}.png'
+    file_path = os.path.join(FOLDER_PATH, file_name)
+    try:
+        run_command('xdotool key Print')
+        run_command(f'xdotool type "{cib}"')
+        run_command("xdotool key Return")
+        move_file(file_name)
+        img_cv = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
+        height, width = img_cv.shape
+        img_cv = img_cv[200:height-100,200:(width - 200)]
+        lines = pytesseract.image_to_string(img_cv, lang="por")
+        lines = lines.split('\n')
+        lines = [line for line in lines if line.strip()]
+        result = next((value for line in lines for key, value in MAP_ERROR.items() if key in line), False)
+        if not result: return MAP_ERROR['generico']
+        return False if 'nova certidão' in result else result
+    except Exception as e:
+        logging.exception(f'Não foi possível extrair texto da imagem | CIB: {cib}')
+        exit(1)
+    finally: remove_file(file_path)
+
+def get_cibs(c, c_error):
+    docs = c.aggregate([
+        {"$match": {"CPF_CNPJ": None, "NR_IMOVEL": {"$ne": None}}},
+    ])
+    docs_error = c_error.find()
+    cibs_error_set = {doc['NR_IMOVEL'] for doc in docs_error}
+    cibs = [doc['NR_IMOVEL'] for doc in docs if doc['NR_IMOVEL'] not in cibs_error_set]
+    return cibs
+
 def main():
     try:
         client = MongoClient(HOST)
         collection = client[DATABASE_NAME][COLLECTION_NAME]
-        docs = collection.aggregate([
-            {"$match": {"CPF_CNPJ": None, "NR_IMOVEL": {"$ne": None}}},
-            {"$sample": {"size": 1000}}
-        ])
-        cibs = [doc['NR_IMOVEL'] for doc in docs]
+        collection_error = client[DATABASE_NAME][COLLECTION_ERROR]
     except Exception as e:
-        logging.error(f"Encerrando o programa, pois não foi possível criar conexão com o mongodb | ERROR: {e}")
+        logging.exception(f"Encerrando o programa, pois não foi possível criar conexão com o mongodb | ERROR: {e}")
         exit(1)
-        
+
+    cibs = get_cibs(collection, collection_error)
+    
+    if os.path.exists(FOLDER_PATH): shutil.rmtree(FOLDER_PATH)
     os.makedirs(FOLDER_PATH, exist_ok=True)
     count = -1
-
+    #cibs = ['88788121', '88789713', '88790231', '88790614'] # validos
+    #cibs = ['21662037', '70206783', '44259360'] # errados/validos
     try:
         for cib in cibs:
             count = update_count(count)
-            open_window()
-            time.sleep(random.uniform(5, 15))
+            while True:
+                open_window() # abre a aba
+                time.sleep(random.uniform(5, 10))
 
-            run_command("xdotool mousemove 350 500 click 1")
-            logging.info(f'Coletando | CIB: {cib}')
-            run_command("xdotool mousemove 273 628 click 1")
-            run_command(f'xdotool type "{cib}"')
-            run_command("xdotool key Return")
+                # Preenche o campo e envia
+                run_command("xdotool mousemove 350 500 click 1")
+                run_command("xdotool mousemove 273 628 click 1")
+                run_command(f'xdotool type "{cib}"')
+                run_command("xdotool key Return")
 
-            file_name = f"Certidao-{cib}.pdf"
-            download = True
-            if not wait_download(file_name, 5):
+                file_name = f"Certidao-{cib}.pdf"
+
+                if wait_download(file_name, 5):
+                    move_file(file_name)
+                    file_path = os.path.join(FOLDER_PATH, file_name)
+                    update_fields = process_file(file_path)
+                    if update_fields:
+                        insert_fields(collection, update_fields, cib)
+                    logging.info(f'CIB: {cib} | Emitido com sucesso.')
+                    break
+
+                # Se não baixou, analisa erro
+                result = error_analysis(cib)
+                if result:
+                    if 'tente novamente dentro de alguns minutos' in result.lower():
+                        logging.info(f'Bloqueado, esperando 30min...')
+                        time.sleep(1800)  # Bloqueado, espera 30 min
+                        logging.info(f'Retomando a extração.')
+                        continue
+                    else:
+                        insert_error(collection_error, cib, result)
+                    logging.error(f'CIB: {cib} | Erro detectado: {result}')
+                    break
+
+                # Tenta reemitir
                 run_command("xdotool mousemove 589 472 click 1")
                 run_command("xdotool key Tab", 0.1)
                 run_command("xdotool key Tab", 0.1)
                 run_command("xdotool key Return")
 
                 if not wait_download(file_name, 5):
-                    logging.error(f'Não foi possível emitir a certidão.| CIB: {cib}')
-                    download = False
-                else:
-                    logging.info(f'Emissão da certidão realizada com sucesso. | CIB: {cib}')
+                    insert_error(collection_error, cib, MAP_ERROR['generico reemitir'])
+                    logging.error(f'CIB: {cib} | Não foi emitido.')
+                break
 
-            run_command("xdotool key Ctrl+w")
-            if not download:
-                continue
-            
-            move_file(file_name)
-            file_path = os.path.join(FOLDER_PATH, file_name)
-            update_fields = process_file(file_path)
-            remove_file(file_path)
-            if not update_fields:
-                continue
-            
-            insert_fields(collection, update_fields, cib)
+            run_command("xdotool key Ctrl+w")  # Fecha aba
     except Exception as e:
-        logging.error(f"Encerrando o programa, pois não foi possível emitir as certidões pelo CIB | ERROR: {e}")
+        logging.exception(f"Encerrando o programa, pois não foi possível emitir as certidões pelo CIB | ERROR: {e}")
     finally:
         if os.path.exists(FOLDER_PATH): shutil.rmtree(FOLDER_PATH)
-
+        if client: client.close()
 if __name__ == '__main__':
     main()
