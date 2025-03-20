@@ -1,3 +1,4 @@
+import os
 import cv2
 import pytesseract
 
@@ -10,18 +11,15 @@ MAP_ERROR = {
     'generico': 'Não foi possível emitir a certidão para o CIB especificado.'
 }
 
+IMAGENS_PATH = os.getenv("IMAGENS_PATH")
+FILE_NAME = os.path.join(IMAGENS_PATH, '')
+
 # Carrega a imagem usando OpenCV
-img_cv = cv2.imread("./img_test/error6.png", cv2.IMREAD_GRAYSCALE)
+img_cv = cv2.imread(FILE_NAME, cv2.IMREAD_GRAYSCALE)
 height, width = img_cv.shape
 img_cv = img_cv[200:height-100,200:(width - 200)]
 
 cv2.imwrite("save.png", img_cv)
-
-# Reduz ruído com um desfoque Gaussiano
-#img_cv = cv2.GaussianBlur(img_cv, (5,5), 0)
-
-# Aplica binarização adaptativa
-#img_cv = cv2.adaptiveThreshold(img_cv, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2)
 
 lines = pytesseract.image_to_string(img_cv, lang="por")
 lines = lines.split('\n')

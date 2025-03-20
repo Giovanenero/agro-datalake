@@ -1,7 +1,7 @@
-.env
-*.log
-./img_test
 venv/
+__pycache__/
+*.log
+README.md
 *.png
 downloads/
 imagens/

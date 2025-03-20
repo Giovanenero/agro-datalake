@@ -20,15 +20,14 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+ENV = os.getenv("ENV", None)
+DOWNLOAD_PATH = os.getenv("DOWNLOADS_PATH") if ENV != 'container' else '/app/downloads'
+IMAGENS_PATH = os.getenv("IMAGENS_PATH") if ENV != 'container' else '/app/imagens'
 HOST = os.getenv("HOST")
 DATABASE_NAME = 'AGRONEGOCIO'
 COLLECTION_NAME = 'CAFIR'
 COLLECTION_ERROR = 'CIB_INVALIDO'
 URL = 'https://solucoes.receita.fazenda.gov.br/Servicos/certidaointernet/ITR/Emitir'
-DOWNLOAD_PATH = "/home/giovane/Downloads"
-IMAGENS_PATH = '/home/giovane/Imagens'
-FOLDER_PATH = os.path.join(os.getcwd(), 'temp')
-LIMIT = 200
 
 MAP_ERROR = {
     '(Cancelado por Decisão Administrativa)': 'A emissão de certidão não foi permitida, pois o imóvel especificado foi cancelado por decisão administrativa.',
@@ -67,12 +66,6 @@ def wait_download(file_name, timeout=30):
         time.sleep(1)
     return False
 
-def move_file(file_name:str):
-    folder_path = DOWNLOAD_PATH if file_name.endswith('.pdf') else IMAGENS_PATH
-    file_path = os.path.join(folder_path, file_name)
-    if os.path.exists(file_path):
-        shutil.move(file_path, FOLDER_PATH)
-
 def process_file(file_path):    
     try:
         file = open(file_path, 'rb')
@@ -106,6 +99,7 @@ def insert_fields(collection, update_fields, cib):
         )
     except Exception as e:
         logging.exception(f"Erro ao atualizar documento em {COLLECTION_NAME} | CIB: {cib}")
+        exit(1)
 
 def insert_error(collection, cib, error):
     try:
@@ -117,26 +111,25 @@ def insert_error(collection, cib, error):
         collection.insert_one(doc)
     except Exception as e:
         logging.exception(f'Erro ao inserir documento em {COLLECTION_ERROR} | CIB: {cib}')
+        exit(1)
 
 def remove_file(file_path):
     if os.path.exists(file_path):
         os.remove(file_path)
 
-def update_count(count:int):
-    count += 1
-    if count >= LIMIT:
-        count = 0
-        time.sleep(1800) # espera 30min, pois assim deve evitar o bloqueio por parte do site
-    return count
-
 def error_analysis(cib):
     file_name = f'{cib}.png'
-    file_path = os.path.join(FOLDER_PATH, file_name)
+    file_path = os.path.join(IMAGENS_PATH, file_name)
     try:
-        run_command('xdotool key Print')
-        run_command(f'xdotool type "{cib}"')
-        run_command("xdotool key Return")
-        move_file(file_name)
+        while True:
+            run_command('xdotool key Print', 1)
+            run_command(f'xdotool type "{cib}"')
+            run_command("xdotool key Return")
+            #if move_file(file_name): break
+            if os.path.exists(file_path): break
+            run_command('xdotool key Escape')
+            time.sleep(1)
+
         img_cv = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
         height, width = img_cv.shape
         img_cv = img_cv[200:height-100,200:(width - 200)]
@@ -170,15 +163,9 @@ def main():
         exit(1)
 
     cibs = get_cibs(collection, collection_error)
-    
-    if os.path.exists(FOLDER_PATH): shutil.rmtree(FOLDER_PATH)
-    os.makedirs(FOLDER_PATH, exist_ok=True)
-    count = -1
-    #cibs = ['88788121', '88789713', '88790231', '88790614'] # validos
-    #cibs = ['21662037', '70206783', '44259360'] # errados/validos
+    #cibs = ['88790606', '88846946'] #cibs invalido
     try:
         for cib in cibs:
-            count = update_count(count)
             while True:
                 open_window() # abre a aba
                 time.sleep(random.uniform(5, 10))
@@ -192,12 +179,12 @@ def main():
                 file_name = f"Certidao-{cib}.pdf"
 
                 if wait_download(file_name, 5):
-                    move_file(file_name)
-                    file_path = os.path.join(FOLDER_PATH, file_name)
+                    #move_file(file_name)
+                    file_path = os.path.join(DOWNLOAD_PATH, file_name)
                     update_fields = process_file(file_path)
-                    if update_fields:
-                        insert_fields(collection, update_fields, cib)
+                    insert_fields(collection, update_fields, cib)
                     logging.info(f'CIB: {cib} | Emitido com sucesso.')
+                    remove_file(file_path)
                     break
 
                 # Se não baixou, analisa erro
@@ -222,13 +209,15 @@ def main():
                 if not wait_download(file_name, 5):
                     insert_error(collection_error, cib, MAP_ERROR['generico reemitir'])
                     logging.error(f'CIB: {cib} | Não foi emitido.')
+                else:
+                    logging.info(f'CIB: {cib} | Emitido com sucesso.')
+                    remove_file(file_path)
                 break
 
             run_command("xdotool key Ctrl+w")  # Fecha aba
     except Exception as e:
         logging.exception(f"Encerrando o programa, pois não foi possível emitir as certidões pelo CIB | ERROR: {e}")
     finally:
-        if os.path.exists(FOLDER_PATH): shutil.rmtree(FOLDER_PATH)
         if client: client.close()
 if __name__ == '__main__':
     main()
