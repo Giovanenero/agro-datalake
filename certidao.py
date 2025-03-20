@@ -159,17 +159,20 @@ def main():
         collection = client[DATABASE_NAME][COLLECTION_NAME]
         collection_error = client[DATABASE_NAME][COLLECTION_ERROR]
     except Exception as e:
-        logging.exception(f"Encerrando o programa, pois não foi possível criar conexão com o mongodb | ERROR: {e}")
+        logging.exception(f"Erro ao conectar ao MongoDB | ERROR: {e}")
         exit(1)
 
     cibs = get_cibs(collection, collection_error)
     #cibs = ['88790606', '88846946'] #cibs invalido
-    try:
-        for cib in cibs:
-            while True:
-                open_window() # abre a aba
-                time.sleep(random.uniform(5, 10))
 
+    for cib in cibs:
+        download = False
+        retry_count = 0
+
+        while not download and retry_count < 3:
+            open_window()  # Abre aba antes da tentativa
+
+            try:
                 # Preenche o campo e envia
                 run_command("xdotool mousemove 350 500 click 1")
                 run_command("xdotool mousemove 273 628 click 1")
@@ -177,47 +180,52 @@ def main():
                 run_command("xdotool key Return")
 
                 file_name = f"Certidao-{cib}.pdf"
+                file_path = os.path.join(DOWNLOAD_PATH, file_name)
 
+                # Espera o download antes de tentar qualquer reemissão
                 if wait_download(file_name, 5):
-                    #move_file(file_name)
-                    file_path = os.path.join(DOWNLOAD_PATH, file_name)
-                    update_fields = process_file(file_path)
-                    insert_fields(collection, update_fields, cib)
-                    logging.info(f'CIB: {cib} | Emitido com sucesso.')
-                    remove_file(file_path)
-                    break
-
-                # Se não baixou, analisa erro
-                result = error_analysis(cib)
-                if result:
-                    if 'tente novamente dentro de alguns minutos' in result.lower():
-                        logging.info(f'Bloqueado, esperando 30min...')
-                        time.sleep(1800)  # Bloqueado, espera 30 min
-                        logging.info(f'Retomando a extração.')
-                        continue
-                    else:
-                        insert_error(collection_error, cib, result)
-                    logging.error(f'CIB: {cib} | Erro detectado: {result}')
-                    break
-
-                # Tenta reemitir
-                run_command("xdotool mousemove 589 472 click 1")
-                run_command("xdotool key Tab", 0.1)
-                run_command("xdotool key Tab", 0.1)
-                run_command("xdotool key Return")
-
-                if not wait_download(file_name, 5):
-                    insert_error(collection_error, cib, MAP_ERROR['generico reemitir'])
-                    logging.error(f'CIB: {cib} | Não foi emitido.')
+                    download = True
                 else:
-                    logging.info(f'CIB: {cib} | Emitido com sucesso.')
-                    remove_file(file_path)
-                break
+                    # Se não baixou, analisa erro
+                    result = error_analysis(cib)
+                    if result:
+                        if 'tente novamente dentro de alguns minutos' in result.lower():
+                            retry_count += 1
+                            logging.info(f'CIB {cib} bloqueado, aguardando 30min... (Tentativa {retry_count}/3)')
+                            time.sleep(1800)  # Bloqueado, espera 30 min
+                            logging.info(f'Retentando CIB {cib}...')
+                            run_command("xdotool key Ctrl+w")  # Fecha aba e reabre na próxima tentativa
+                            continue  # Tenta o mesmo CIB novamente
+                        else:
+                            insert_error(collection_error, cib, result)
+                            logging.error(f'CIB: {cib} | Erro detectado: {result}')
+                            break  # Se for outro erro, desiste desse CIB
 
-            run_command("xdotool key Ctrl+w")  # Fecha aba
-    except Exception as e:
-        logging.exception(f"Encerrando o programa, pois não foi possível emitir as certidões pelo CIB | ERROR: {e}")
-    finally:
-        if client: client.close()
+                    # Se não houve erro específico, tenta reemitir
+                    run_command("xdotool mousemove 589 472 click 1")
+                    run_command("xdotool key Tab", 0.1)
+                    run_command("xdotool key Tab", 0.1)
+                    run_command("xdotool key Return")
+
+                    if wait_download(file_name, 5):
+                        download = True
+                    else:
+                        insert_error(collection_error, cib, MAP_ERROR['generico reemitir'])
+                        logging.error(f'CIB: {cib} | Não foi emitido.')
+                        break # Desiste desse CIB
+
+            except Exception as e:
+                logging.exception(f"Erro ao processar CIB {cib} | ERROR: {e}")
+
+            finally:
+                run_command("xdotool key Ctrl+w")  # Fecha aba antes de recomeçar
+
+        if download:
+            update_fields = process_file(file_path)
+            insert_fields(collection, update_fields, cib)
+            logging.info(f'CIB: {cib} | Emitido com sucesso.')
+
+    if client: client.close()
+
 if __name__ == '__main__':
     main()
