@@ -1,7 +1,11 @@
 .env
-*.log
-./img_test
-venv/
-*.png
-downloads/
-imagens/
+*.py
+TODO.txt
+
+extraction/downloads/
+extraction/imagens/
+extraction/venv/
+extraction/*.png
+extraction/*.log
+
+backend/models/__pycache__
