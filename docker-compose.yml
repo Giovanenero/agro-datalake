@@ -21,11 +21,30 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /usr/bin/google-chrome:/usr/bin/google-chrome
       - /usr/lib/google-chrome:/usr/lib/google-chrome
-      - ${DOWNLOADS_PATH}:/app/extraction/downloads
-      - ${IMAGENS_PATH}:/app//extraction/imagens
+      - ${DOWNLOADS_PATH}:/app/downloads
+      - ${IMAGENS_PATH}:/app//imagens
+      - ./extensoes/hekt:/app/hekt
     privileged: true
     stdin_open: true 
-    
+
+  backend:
+    image: backend
+    build:
+      context: ./backend
+      dockerfile: dockerfile
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    depends_on:
+      - mongodb
+    networks:
+      - agro-datalake
+    volumes:
+      - ./backend:/app
+      - ./extensoes/hekt:/app/hekt
+      - ./extensoes/hekt2:/app/hekt2
+
   mongodb:
     image: mongo:latest
     ports:

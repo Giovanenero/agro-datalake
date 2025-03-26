@@ -9,5 +9,8 @@ TODO.txt
 /extraction/*.png
 /extraction/downloads/
 /extraction/imagens/
+/extraction/hekt
 
-backend/models/__pycache__
+/backend/models/__pycache__
+/backend/hekt
+/backend/hekt2

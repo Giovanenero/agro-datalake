@@ -6,3 +6,4 @@ beautifulsoup4==4.12.3
 selenium==4.24.0
 2captcha-python==1.5.1
 beautifulsoup4==4.12.3
+undetected-chromedriver==3.5.5
