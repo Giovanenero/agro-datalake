@@ -1,5 +1,5 @@
 .env
-*.py
+./*.py
 TODO.txt
 
 extraction/downloads/
